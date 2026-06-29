@@ -1,0 +1,93 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Weather Dashboard</title>
+    <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+    <div class="container">
+        <header>
+            <h1>🌤️ Weather Dashboard</h1>
+            <p class="subtitle">Real-time weather information</p>
+        </header>
+
+        <div class="search-container">
+            <input 
+                type="text" 
+                id="cityInput" 
+                placeholder="Enter city name..." 
+                class="search-input"
+            >
+            <button id="searchBtn" class="search-btn">Search</button>
+        </div>
+
+        <div id="loading" class="loading hidden">
+            <div class="spinner"></div>
+            <p>Loading weather data...</p>
+        </div>
+
+        <div id="errorMessage" class="error hidden"></div>
+
+        <div id="weatherContainer" class="weather-container hidden">
+            <div class="current-weather">
+                <div class="location-info">
+                    <h2 id="cityName"></h2>
+                    <p id="countryCode"></p>
+                </div>
+
+                <div class="main-weather">
+                    <div class="temperature">
+                        <span id="temp" class="temp-value"></span>
+                        <span class="temp-unit">°C</span>
+                    </div>
+                    <div class="weather-desc">
+                        <img id="weatherIcon" src="" alt="weather icon" class="weather-icon">
+                        <p id="description"></p>
+                    </div>
+                </div>
+
+                <div class="weather-details">
+                    <div class="detail-item">
+                        <span class="detail-label">Feels Like</span>
+                        <span id="feelsLike" class="detail-value"></span>
+                    </div>
+                    <div class="detail-item">
+                        <span class="detail-label">Humidity</span>
+                        <span id="humidity" class="detail-value"></span>
+                    </div>
+                    <div class="detail-item">
+                        <span class="detail-label">Wind Speed</span>
+                        <span id="windSpeed" class="detail-value"></span>
+                    </div>
+                    <div class="detail-item">
+                        <span class="detail-label">Pressure</span>
+                        <span id="pressure" class="detail-value"></span>
+                    </div>
+                    <div class="detail-item">
+                        <span class="detail-label">Visibility</span>
+                        <span id="visibility" class="detail-value"></span>
+                    </div>
+                    <div class="detail-item">
+                        <span class="detail-label">UV Index</span>
+                        <span id="uvIndex" class="detail-value"></span>
+                    </div>
+                </div>
+            </div>
+
+            <div class="forecast-container">
+                <h3>5-Day Forecast</h3>
+                <div id="forecastCards" class="forecast-cards"></div>
+            </div>
+        </div>
+
+        <footer>
+            <p>Weather data provided by Open-Meteo API</p>
+            <p>Last updated: <span id="lastUpdated"></span></p>
+        </footer>
+    </div>
+
+    <script src="app.js"></script>
+</body>
+</html>
