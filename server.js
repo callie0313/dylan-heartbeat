@@ -466,7 +466,7 @@ app.addHook("onRequest", (req, reply, done) => {
 app.get("/v1/models", async (req, reply) => {
   reply.send({
     object: "list",
-    data: [{ id: "DeepSeek-V4-Pro", object: "model", created: 0, owned_by: "gateway" }]
+    data: [{ id: process.env.MODEL_NAME, object: "model", created: 0, owned_by: "gateway" }]
   });
 });
 
