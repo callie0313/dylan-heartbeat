@@ -563,7 +563,7 @@ ${historyText}`
       console.log("\n推送内容清洗后为空，本次不发送推送\n");
       eventContent = `（${getLocalTimeString()} 自动唤醒：本次未发送推送｜原因：推送内容为空）`;
     } else if (lines.length === 1) {
-      title = "来自AI";
+      title = "宝宝";
       body = lines[0].trim();
     } else if (lines.length === 2) {
       title = lines[0].trim();
