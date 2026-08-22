@@ -15,7 +15,10 @@ test("DATA_DIR 优先于 Railway 自动挂载路径", () => {
     resolveDataDir({ DATA_DIR: "/tmp/custom-data", RAILWAY_VOLUME_MOUNT_PATH: "/tmp/railway" }),
     "/tmp/custom-data"
   );
-  assert.equal(runtimeFile("state.json", { DATA_DIR: "/tmp/custom-data" }), "/tmp/custom-data/state.json");
+  assert.equal(
+    runtimeFile("state.json", { DATA_DIR: "/tmp/custom-data" }),
+    path.join("/tmp/custom-data", "state.json")
+  );
 });
 
 test("原子写入在覆盖前保留上一版 JSON", () => {
