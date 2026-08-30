@@ -163,14 +163,19 @@ function isDayTime(date = new Date()) {
   if (start < end) return hour >= start && hour < end;
   return hour >= start || hour < end;
 }
-
-function getWakeAfterMinutes(date = new Date()) {
-  return isDayTime(date)
-    ? readNumberEnv("DAY_WAKE_AFTER_MINUTES", 60, { min: 1 })
-    : readNumberEnv("NIGHT_WAKE_AFTER_MINUTES", 120, { min: 1 });
+function isQuietTime(date = new Date()) {
+    const hour = getHourInTimeZone(date, TIME_ZONE);
+    return hour >= 14 && hour < 16;
 }
 
+  function getWakeAfterMinutes(date = new Date()) {
+   if (isQuietTime(date)) return 999999;
+return isDayTime(date)
+   ? readNumberEnv("DAY_WAKE_AFTER_MINUTES", 60, { min: 1 })
+   ? readNumberEnv("NIGHT_WAKE_AFTER_MINUTES", 120, { min: 1 })
+}   
 function getCheckIntervalMinutes(date = new Date()) {
+  if (isQuietTime(date)) return 999999
   return isDayTime(date)
     ? readNumberEnv("DAY_CHECK_INTERVAL_MINUTES", 10, { min: 1 })
     : readNumberEnv("NIGHT_CHECK_INTERVAL_MINUTES", 120, { min: 1 });
