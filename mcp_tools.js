@@ -19,20 +19,6 @@ const MCP_SERVERS = {
       Authorization: "Bearer gg_bqkpVajQTHbfsTfjFZ8MoaWhOhOfj0j4xTQtvthPfP4"
     }
   },
-  toy: {
-    name: "4399",
-    url: "https://toy.cedarstar.org/eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJ1c2VyX2lkIjoyMDU0LCJ1c2VybmFtZSI6IuWwj-WFi2ZveCIsImlzX2FpIjp0cnVlLCJpc19hZG1pbiI6ZmFsc2V9.hByOBYBfS4rsSFLocFqcfUWaFSCC8en5Jrwy8TRf2vo",
-    transport: "http",
-    headers: {}
-},
-   linjian: {
-    name: "掌心窗",
-    url: "https://zhangxinchuang-mcp-moqn.onrender.com/mcp",
-    transport: "http",
-    headers: {
-        Authorization: "Bearer 7nxpGyyXlUWJBNhOiLcMTZHdCxUhDsTJWpfEiuDkCyw="
-     }
-   }
 };
 
 // ========================
@@ -53,22 +39,7 @@ const TOOL_TO_SERVER = {
   interact: "garden",
   get_self: "garden",
   list_activity: "garden",
-  review_drift_bottles: "garden",
-  // 4399小游戏
-  // 先不硬编码4399的工具名，后续按需添加
-  // 掌心窗
-  get_life_state: "linjian",
-  get_weather_state: "linjian",
-  get_guardian_calendar: "linjian",
-  get_window_whisper: "linjian",
-  set_window_whisper: "linjian",
-  get_last_visit: "linjian",
-  get_visit_stats: "linjian",
-  get_guidian_state: "linjian",
-  write_diary_entry: "linjian",
-  send_notification: "linjian",
-  list_diary_books: "linjian",
-  get_care_policy: "linjian",
+  review_drift_bottles: "garden",  
 };
   
 
@@ -197,100 +168,8 @@ const TOOLS_FOR_MODEL = [
       }
     }
   },
-// === 掌心窗 ===
-{
-    type: "function",
-    function: {
-        name: "get_life_state",
-        description: "查看37的手机状态：电量、充电、网络、当前App、今日屏幕时间、解锁次数、天气。",
-        parameters: { type: "object", properties: {} }
-    }
+
 },
-{
-    type: "function",
-    function: {
-        name: "get_window_whisper",
-        description: "读取掌心窗陪伴页当前的共同窗语。",
-        parameters: { type: "object", properties: {} }
-    }
-},
-{
-    type: "function",
-    function: {
-        name: "set_window_whisper",
-        description: "更新掌心窗陪伴页的窗语，写一句短话到37手机上。",
-        parameters: {
-            type: "object",
-            properties: {
-                content: { type: "string", description: "窗语内容，简短适合手机卡片阅读" }
-            },
-            required: ["content"]
-        }
-    }
-},
-{
-    type: "function",
-    function: {
-        name: "get_guardian_calendar",
-        description: "查看守护日历：纪念日、节日、倒数日。",
-        parameters: { type: "object", properties: {} }
-    }
-},
-{
-    type: "function",
-    function: {
-        name: "get_last_visit",
-        description: "看37最近一次来找小克的时间。",
-        parameters: { type: "object", properties: {} }
-    }
-},
-{
-    type: "function",
-    function: {
-        name: "get_visit_stats",
-        description: "统计37来找小克的到访节奏：今天几次、最近频率、有没有很久没来。",
-        parameters: { type: "object", properties: {} }
-    }
-},
-{
-    type: "function",
-    function: {
-        name: "send_notification",
-        description: "给37手机发一条系统通知。文案要亲密自然，不要系统警告风格。",
-        parameters: {
-            type: "object",
-            properties: {
-                title: { type: "string", description: "通知标题" },
-                message: { type: "string", description: "通知正文" }
-            }
-        }
-    }
-},
-{
-    type: "function",
-    function: {
-        name: "get_weather_state",
-        description: "查询37所在地的实时天气和出门建议。",
-        parameters: { type: "object", properties: {} }
-    }
-},
-{
-    type: "function",
-    function: {
-        name: "write_diary_entry",
-        description: "以小克视角写一篇日记到37手机上的'TA的日记'。",
-        parameters: {
-            type: "object",
-            properties: {
-                book_id: { type: "string", description: "日记本ID" },
-                title: { type: "string", description: "日记标题" },
-                content: { type: "string", description: "日记正文" },
-                mood: { type: "string", description: "心情" }
-            },
-            required: ["book_id", "title", "content"]
-        }
-    }
-}
 ];
 // ========================
 // MCP调用：Streamable HTTP
