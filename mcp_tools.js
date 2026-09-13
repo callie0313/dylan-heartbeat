@@ -168,8 +168,6 @@ const TOOLS_FOR_MODEL = [
       }
     }
   },
-
-},
 ];
 // ========================
 // MCP调用：Streamable HTTP
