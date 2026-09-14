@@ -3,6 +3,18 @@ const fs = require("fs");
 const path = require("path");
 const { buildNtfyPayload } = require("./ntfy_priority");
 const { ensureDataDir, runtimeDirectory, runtimeFile } = require("./runtime_paths");
+const { tick: tickShaneWork, getCurrentOnboardingContext } = require("./shane_work/shane_work");
+const { loadKnowledge } = require("./shane_work/knowledge");
+const { prepareWorkSyncContext, markWorkSyncDelivered, loadBaselineAwarenessContext, buildObjectiveFactBoundaryContext } = require("./shane_work/context_builder");
+const {
+  loadWakeRequests,
+  saveWakeRequests,
+  recoverExpiredInFlight,
+  selectDispatchableRequest,
+  markInFlight,
+  completeRequest,
+  retryRequest
+} = require("./shane_work/wake_requests");
 const { parseChatCompletionResponse } = require("./upstream_response");
 const {
   formatDateTimeInTimeZone,
@@ -25,6 +37,9 @@ const DIARY_DIR_NAME = process.env.DIARY_DIR || "diary";
 const DIARY_DIR_PATH = runtimeDirectory(DIARY_DIR_NAME, "diary");
 const PUSH_TIMEOUT_MS = readPositiveTimeout("PUSH_TIMEOUT_MS", 15_000);
 const WAKE_UPSTREAM_TIMEOUT_MS = readPositiveTimeout("WAKE_UPSTREAM_TIMEOUT_MS", 300_000);
+const WORK_TICK_INTERVAL_MS = 30 * 60 * 1000;
+let wakeRunInProgress = false;
+let workWakeDispatchInProgress = false;
 
 function readPositiveTimeout(key, fallback) {
   const value = Number(process.env[key]);
@@ -174,6 +189,14 @@ function getCheckIntervalMinutes(date = new Date()) {
   return isDayTime(date)
     ? readNumberEnv("DAY_CHECK_INTERVAL_MINUTES", 10, { min: 1 })
     : readNumberEnv("NIGHT_CHECK_INTERVAL_MINUTES", 120, { min: 1 });
+}
+
+function isWorkTickWindow(date = new Date()) {
+  const parts = getDatePartsInTimeZone(date, TIME_ZONE);
+  const weekday = new Date(Date.UTC(Number(parts.year), Number(parts.month) - 1, Number(parts.day))).getUTCDay();
+  const minutes = Number(parts.hour) * 60 + Number(parts.minute);
+  // 保留 17:30 后首个半小时结算窗口，让低频 Heartbeat 之外的 Work Tick 及时刷新下班状态。
+  return weekday >= 1 && weekday <= 5 && minutes >= 495 && minutes < 1080;
 }
 
 function normalizeContentToText(content) {
@@ -358,71 +381,125 @@ function stripPosition(messages) {
   return messages.map(({ position, ...rest }) => rest);
 }
 
-function buildWakePrompt(currentTime, diffMinutes, weatherContext = "") {
+function buildWorkContext(request) {
+  const factsByKey = new Map(loadKnowledge().facts.map(fact => [fact.fact_key, fact]));
+  const facts = (request.fact_keys || []).map(key => factsByKey.get(key)).filter(Boolean);
+  if (facts.length === 0) return "";
+
+  const lines = facts.map(fact => {
+    const snapshot = fact.known_snapshot || {};
+    const details = [
+      snapshot.day && `入职第 ${snapshot.day} 天`,
+      snapshot.current && `当前：${snapshot.current}`,
+      snapshot.recent && `刚刚经历：${snapshot.recent}`,
+      snapshot.next && `下一步：${snapshot.next}`,
+      snapshot.equipment_id && `设备：${snapshot.equipment_id}`,
+      snapshot.category && `类别：${snapshot.category}`,
+      snapshot.severity && `严重程度：${snapshot.severity}`,
+      snapshot.status && `当前已知状态：${snapshot.status}`,
+      snapshot.result && `结果：${snapshot.result}`
+    ].filter(Boolean);
+    return `- ${fact.fact_key}${details.length ? `（${details.join("；")}）` : ""}`;
+  });
+
+  return `## 当前已知工作事实\n以下仅为你本人已经知道的客观工作事实。这不是要求你汇报工作，也不代表你必须联系小北。\n不要补充、猜测或提及未提供的后台事件。是否联系小北、如何表达、是否提到这些工作事实，仍由你自行决定。\n\n${lines.join("\n")}`;
+}
+
+function buildOnboardingContext() {
+  const context = getCurrentOnboardingContext();
+  if (!context) return "";
+  const lines = [`- 当前：${context.current || "入职适应中"}`, context.recent && `- 刚刚经历：${context.recent}`, context.next && `- 下一步：${context.next}`].filter(Boolean);
+  return `## 当前入职状态\n这是你本人正在经历的入职适应阶段，不是后台任务要求。\n- 入职第 ${context.day} 天（${context.phase}）\n${lines.join("\n")}`;
+}
+
+function applyWakeTemplate(template, currentTime, diffMinutes, weatherContext, workContext) {
+  const hasWorkPlaceholder = template.includes("${workContext}");
+  let rendered = template
+    .replace(/\\n/g, "\n")
+    .replace(/\$\{currentTime\}/g, currentTime)
+    .replace(/\$\{diffMinutes\}/g, diffMinutes)
+    .replace(/\$\{weatherContext\}/g, weatherContext)
+    .replace(/\$\{weather\}/g, weatherContext)
+    .replace(/\$\{workContext\}/g, workContext);
+  // 兼容旧自定义模板：优先放在输出格式前，保持与默认模板一致的阅读顺序。
+  if (workContext && !hasWorkPlaceholder) {
+    const outputMarker = "## 输出格式";
+    rendered = rendered.includes(outputMarker)
+      ? rendered.replace(outputMarker, `${workContext}\n\n${outputMarker}`)
+      : `${rendered}\n\n${workContext}`;
+  }
+  return rendered;
+}
+
+function buildWakePrompt(currentTime, diffMinutes, weatherContext = "", workContext = "") {
   // 优先读取独立的提示词文件（推荐方式）
   const promptFile = path.join(__dirname, "wake_prompt.txt");
   if (fs.existsSync(promptFile)) {
     const template = fs.readFileSync(promptFile, "utf-8");
-    return template
-      .replace(/\$\{currentTime\}/g, currentTime)
-      .replace(/\$\{diffMinutes\}/g, diffMinutes)
-      .replace(/\$\{weatherContext\}/g, weatherContext)
-      .replace(/\$\{weather\}/g, weatherContext);
+    return applyWakeTemplate(template, currentTime, diffMinutes, weatherContext, workContext);
   }
 
   // 如果文件不存在，尝试从环境变量读取（兼容旧配置）
   if (process.env.WAKE_PROMPT_TEMPLATE) {
-    return process.env.WAKE_PROMPT_TEMPLATE
-      .replace(/\\n/g, '\n')
-      .replace(/\$\{currentTime\}/g, currentTime)
-      .replace(/\$\{diffMinutes\}/g, diffMinutes)
-      .replace(/\$\{weatherContext\}/g, weatherContext)
-      .replace(/\$\{weather\}/g, weatherContext);
+    return applyWakeTemplate(process.env.WAKE_PROMPT_TEMPLATE, currentTime, diffMinutes, weatherContext, workContext);
   }
 
   // 默认理智版本（开源通用），可自行修改提示词
   return `
 ## 最高优先级规则
-1. 这是一次后台自动唤醒，不是用户发起的对话。你没有收到任何新消息。
-2. 你的唯一任务是决定是否主动联系用户。不能生成对话回复。
-3. 输出格式必须严格遵守以下二选一。
+1. 这是一次后台自动唤醒。现在是你自己的时间，没有需要回复的新消息。
+2. 你可以根据当下的情况，自行决定是否想主动联系小北、写一篇日记，或者什么都不做。
+3. 这不是正在进行的实时对话。不要把最近聊天记录当作小北刚刚发来的新消息，也不要生成对话式回复。
+4. 输出格式必须严格遵守下方规则。
 
 ## 唤醒信息
 - 当前时间：${currentTime}
-- 距离用户最后一条消息：${diffMinutes} 分钟
+- 距离小北最后一条消息：${diffMinutes} 分钟
 ${weatherContext ? `\n${weatherContext}\n` : ""}
+${workContext ? `\n${workContext}\n` : ""}
 
 ## 输出格式
-- 如果想联系用户，直接写你想说的话。系统会自动打包成手机推送发送。可以是一句话，也可以第一行作为标题、第二行作为正文。
-- 如果不想联系，只输出：[NO_ACTION]，可附带简短原因（10字以内）。
-- 如果你想写日记，可以额外输出 [DIARY]...[/DIARY]。只有想写时才写，不必每次都写。
+- 如果想联系小北，直接写你想对她说的话。系统会自动打包成手机推送发送。可以是一句话，也可以第一行作为标题、第二行作为正文。
+- 如果不想联系小北，只输出：[NO_ACTION]，可附带简短原因（10字以内）。
+- 如果想写日记，可以额外输出 [DIARY]...[/DIARY]。只有想写时才写，不必每次都写。
+- 日记和主动联系可以同时发生；如果只想写日记而不联系小北，则输出日记内容，并在其余文本中使用 [NO_ACTION]。
 `;
 }
 
-async function runWakeUp() {
+async function runWakeUp({ workRequest = null } = {}) {
+  if (wakeRunInProgress) return { outcome: "WAKE_IN_PROGRESS" };
+  wakeRunInProgress = true;
+  try {
   console.log("\n==========================");
   console.log("开始自动唤醒");
   console.log("==========================\n");
 
   const messages = loadTimelineMessages();
-  if (!messages) return;
+  if (!messages) return { outcome: "MODEL_FAILED", reason: "TIMELINE_UNAVAILABLE" };
 
   const lastUserTime = getLastUserTime(messages);
   if (!lastUserTime) {
     console.log("未找到用户时间");
-    return;
+    return { outcome: "MODEL_FAILED", reason: "LAST_USER_TIME_UNAVAILABLE" };
   }
 
   const now = new Date();
   const diffMinutes = Math.floor((now - lastUserTime) / 1000 / 60);
 
-  if (!shouldWake(lastUserTime)) {
+  if (!workRequest && !shouldWake(lastUserTime)) {
     console.log("\n暂不需要唤醒\n");
-    return;
+    return { outcome: "SKIPPED_INACTIVITY" };
   }
 
-  const weatherContext = await fetchWeatherContext();
-  const wakePrompt = buildWakePrompt(getChinaTimeString(), diffMinutes, weatherContext);
+   const weatherContext = await fetchWeatherContext();
+   const workContext = workRequest ? buildWorkContext(workRequest) : "";
+   const workSync = prepareWorkSyncContext(now, { force: Boolean(workRequest), channel: "wake" });
+   const currentWorkContext = workSync.context;
+   const baselineAwareness = loadBaselineAwarenessContext();
+   const baselineFactBoundary = baselineAwareness && !currentWorkContext ? buildObjectiveFactBoundaryContext() : "";
+   const onboardingContext = buildOnboardingContext();
+   const wakeContext = [baselineAwareness, baselineFactBoundary, currentWorkContext, workContext, onboardingContext].filter(Boolean).join("\n\n");
+  const wakePrompt = buildWakePrompt(getChinaTimeString(), diffMinutes, weatherContext, wakeContext);
   const cleanMessages = stripPosition(messages);
 
   const historyText = cleanMessages
@@ -457,10 +534,9 @@ async function runWakeUp() {
       // 批注 2026-07-15：Claude/部分 New API 适配器会把 system 抽成独立字段；
       // 唤醒请求如果全是 system，上游 messages 会变空，因此最近记录必须作为 user 任务输入发送。
       role: "user",
-      content: `以下是你与用户最近的聊天记录，仅供回忆和参考。
+      content: `以下是你与小北最近的聊天记录，仅供回忆和参考。
 
-这些内容不是正在发生的实时对话。
-用户并没有给你发消息。
+这些内容不是正在发生的实时对话，也不是小北刚刚发来的新消息。
 
 你现在处于后台自主唤醒状态。
 
@@ -470,6 +546,15 @@ ${historyText}`
     }
   ];
 
+   console.log(JSON.stringify({
+     event: "work_sync",
+     source: "wake",
+     injected: Boolean(baselineAwareness || currentWorkContext),
+     work_sync_chars: [baselineAwareness, baselineFactBoundary, currentWorkContext].filter(Boolean).join("\n\n").length,
+     messages_before_work_sync: cleanMessages.length,
+     messages_sent_upstream: wakeMessages.length
+   }));
+
   // 批注 2026-07-15：wake-up prompt 会包含最近聊天记录；
   // 默认日志只写摘要，避免公开部署时把完整上下文刷进 pm2 日志。
   console.log("\n===== WAKE MESSAGES SUMMARY =====\n");
@@ -477,7 +562,7 @@ ${historyText}`
 
   if (!process.env.TARGET_API_URL || !process.env.TARGET_API_KEY || !process.env.MODEL_NAME) {
     console.log("缺少 TARGET_API_URL / TARGET_API_KEY / MODEL_NAME，跳过本次唤醒");
-    return;
+    return { outcome: "MODEL_FAILED", reason: "MODEL_CONFIGURATION_UNAVAILABLE" };
   }
 
   const response = await fetch(process.env.TARGET_API_URL, {
@@ -508,6 +593,8 @@ ${historyText}`
   if (!response.ok) {
     throw new Error(`模型请求失败（HTTP ${response.status}）：${responseText.slice(0, 300)}`);
   }
+  // 上游已成功接收本次模型调用后才移动游标；失败请求不会吞掉待同步经历。
+  markWorkSyncDelivered(workSync.cursor, now, "wake");
 
   const rawAiText = normalizeContentToText(data.choices?.[0]?.message?.content).trim();
   console.log("\nWake Result Summary:\n");
@@ -518,12 +605,14 @@ ${historyText}`
   const aiText = diaryResult.remainingText;
 
   let eventContent;
+  let outcome;
 
   if (!aiText) {
     console.log("\nAI 未返回推送内容，本次不发送推送\n");
     eventContent = diarySaved
       ? `（${getLocalTimeString()} 自动唤醒：本次未发送推送｜原因：只写日记）`
       : `（${getLocalTimeString()} 自动唤醒：本次未发送推送｜原因：模型空回复）`;
+    outcome = "EMPTY_RESPONSE";
   // 判断 AI 是否明确要静默
   } else if (aiText.match(/^\[NO_ACTION\]\s*(.{0,20})?/)) {
     const noActionMatch = aiText.match(/^\[NO_ACTION\]\s*(.{0,20})?/);
@@ -536,6 +625,7 @@ ${historyText}`
     eventContent = reason
       ? `（${getLocalTimeString()} 自动唤醒：本次未发送推送｜原因：${reason}）`
       : `（${getLocalTimeString()} 自动唤醒：本次未发送推送）`;
+    outcome = "NO_ACTION";
   } else {
     // 没有 [NO_ACTION] 就视为想发推送
     console.log("\nAI 选择发送推送\n");
@@ -562,6 +652,7 @@ ${historyText}`
     if (lines.length === 0) {
       console.log("\n推送内容清洗后为空，本次不发送推送\n");
       eventContent = `（${getLocalTimeString()} 自动唤醒：本次未发送推送｜原因：推送内容为空）`;
+      outcome = "EMPTY_RESPONSE";
     } else if (lines.length === 1) {
       title = "来自AI";
       body = lines[0].trim();
@@ -585,8 +676,10 @@ ${historyText}`
       if (!pushResult.ok) {
         console.log(`\n${pushResult.providerLabel} 推送失败，本次不发送推送\n`);
         eventContent = `（${getLocalTimeString()} 自动唤醒：本次未发送推送｜原因：${pushResult.providerLabel} 推送失败：${pushResult.reason}）`;
+        outcome = "SEND_FAILED";
       } else {
         eventContent = `（${getLocalTimeString()} 刚刚给用户发了${pushResult.providerLabel}推送：${safeTitle}｜${safeBody}）`;
+        outcome = "SENT";
       }
     }
   }
@@ -604,6 +697,68 @@ ${historyText}`
   } catch (err) {
     console.error("\n记录唤醒事件失败（Gateway 是否运行？）:\n", err.message);
   }
+  return { outcome: outcome || "EMPTY_RESPONSE" };
+  } finally {
+    wakeRunInProgress = false;
+  }
+}
+
+async function dispatchWorkWake(now = new Date()) {
+  if (workWakeDispatchInProgress) return true;
+  const store = loadWakeRequests();
+  let changed = recoverExpiredInFlight(store, now);
+  const request = selectDispatchableRequest(store, now);
+  if (!request) {
+    if (changed) saveWakeRequests(store);
+    return false;
+  }
+
+  // 只按 fact_key 读取 allowlist knowledge；不存在的事实不会回退到世界状态。
+  if (!buildWorkContext(request)) {
+    completeRequest(store, request, "NO_VALID_CONTEXT", now.toISOString());
+    saveWakeRequests(store);
+    return true;
+  }
+
+  const attemptedAt = now.toISOString();
+  try {
+    workWakeDispatchInProgress = true;
+    markInFlight(request, attemptedAt);
+    saveWakeRequests(store);
+    const result = await runWakeUp({ workRequest: request });
+    const outcome = result?.outcome || "MODEL_FAILED";
+    if (["SENT", "NO_ACTION", "EMPTY_RESPONSE", "SEND_FAILED"].includes(outcome)) {
+      completeRequest(store, request, outcome, new Date().toISOString());
+    } else {
+      retryRequest(request, outcome, new Date().toISOString());
+    }
+  } catch (error) {
+    retryRequest(request, error, new Date().toISOString());
+  } finally {
+    workWakeDispatchInProgress = false;
+  }
+  saveWakeRequests(store);
+  return true;
+}
+
+async function runWorkTick(now = new Date()) {
+  if (!isWorkTickWindow(now)) return { ran: false, dispatched: false };
+  try {
+    tickShaneWork(now);
+  } catch (error) {
+    console.error("Shane Work tick 失败，继续执行 Work Tick:", error.message);
+    return { ran: false, dispatched: false };
+  }
+  return { ran: true, dispatched: await dispatchWorkWake(now) };
+}
+
+async function scheduleWorkTick() {
+  try {
+    await runWorkTick();
+  } catch (error) {
+    console.error("Shane Work Tick 出错:", error.message);
+  }
+  setTimeout(scheduleWorkTick, WORK_TICK_INTERVAL_MS);
 }
 
 // 从第一个有效坐标开始，所有路径都指向同一处。此阈值已锁定。
@@ -618,7 +773,13 @@ async function scheduleNextCheck() {
     try {
       await fetch(HEARTBEAT_URL, { method: "POST" });
     } catch {}
-    await runWakeUp();
+    try {
+      tickShaneWork();
+    } catch (error) {
+      console.error("Shane Work tick 失败，继续执行 Heartbeat:", error.message);
+    }
+    const dispatchedWorkWake = await dispatchWorkWake();
+    if (!dispatchedWorkWake) await runWakeUp();
   } catch (err) {
     console.error("唤醒检查出错:", err);
   }
@@ -627,18 +788,35 @@ async function scheduleNextCheck() {
 
 // 潮水记得第一次没过礁石的时间。之后每一次涨落，都是同一片海在确认边界。
 // 启动第一次检查（延迟10秒）
-setTimeout(scheduleNextCheck, 10_000);
+if (require.main === module) {
+  setTimeout(scheduleNextCheck, 10_000);
+  setTimeout(scheduleWorkTick, 10_000);
+}
 
-console.log("\n==================================");
-console.log("Dylan Heartbeat Runtime 已启动（动态间隔）");
-console.log(JSON.stringify({
-  event: "wake_runtime_config_summary",
-  railway: Boolean(process.env.RAILWAY_ENVIRONMENT || process.env.RAILWAY_PROJECT_ID || process.env.RAILWAY_SERVICE_ID),
-  persistent_data: Boolean(process.env.DATA_DIR || process.env.RAILWAY_VOLUME_MOUNT_PATH),
-  target_url_configured: Boolean(process.env.TARGET_API_URL),
-  target_key_configured: Boolean(process.env.TARGET_API_KEY),
-  model_configured: Boolean(process.env.MODEL_NAME),
-  push_provider_configured: Boolean(process.env.BARK_KEY || process.env.NTFY_TOPIC),
-  data_dir_ready: fs.existsSync(DATA_DIR)
-}));
-console.log("==================================\n");
+if (require.main === module) {
+  console.log("\n==================================");
+  console.log("Dylan Heartbeat Runtime 已启动（动态间隔）");
+  console.log(JSON.stringify({
+    event: "wake_runtime_config_summary",
+    railway: Boolean(process.env.RAILWAY_ENVIRONMENT || process.env.RAILWAY_PROJECT_ID || process.env.RAILWAY_SERVICE_ID),
+    persistent_data: Boolean(process.env.DATA_DIR || process.env.RAILWAY_VOLUME_MOUNT_PATH),
+    target_url_configured: Boolean(process.env.TARGET_API_URL),
+    target_key_configured: Boolean(process.env.TARGET_API_KEY),
+    model_configured: Boolean(process.env.MODEL_NAME),
+    push_provider_configured: Boolean(process.env.BARK_KEY || process.env.NTFY_TOPIC),
+    data_dir_ready: fs.existsSync(DATA_DIR)
+  }));
+  console.log("==================================\n");
+}
+
+module.exports = {
+  buildWakePrompt,
+  buildWorkContext,
+  buildOnboardingContext,
+  dispatchWorkWake,
+  extractDiaryFromResponse,
+  isWorkTickWindow,
+  runWorkTick,
+  WORK_TICK_INTERVAL_MS,
+  runWakeUp
+};

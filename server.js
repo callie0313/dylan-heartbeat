@@ -12,6 +12,7 @@ const {
 } = require("./runtime_paths");
 const { isSpecialEventContent } = require("./special_events");
 const { decideRequestAccess } = require("./network_access");
+const { prepareWorkSyncContext, markWorkSyncDelivered, insertTransientCurrentWorkContext, loadBaselineAwarenessContext, buildObjectiveFactBoundaryContext } = require("./shane_work/context_builder");
 const {
   formatDateTimeInTimeZone,
   resolveTimeZone,
@@ -692,6 +693,21 @@ app.post("/v1/chat/completions", async (req, reply) => {
       llmMessages.splice(idx, 1);
     }
 
+    // 仅加入本次上游请求，不写回 Kelivo messages、timeline 或持久聊天历史。
+    const workSync = prepareWorkSyncContext(new Date(), { channel: "kelivo" });
+    const baselineAwareness = loadBaselineAwarenessContext();
+    const baselineFactBoundary = baselineAwareness && !workSync.context ? buildObjectiveFactBoundaryContext() : "";
+    const transientWorkContext = [baselineAwareness, baselineFactBoundary, workSync.context].filter(Boolean).join("\n\n");
+    const messagesWithCurrentWork = insertTransientCurrentWorkContext(llmMessages, transientWorkContext);
+    console.log(JSON.stringify({
+      event: "work_sync",
+      source: "kelivo_gateway",
+      injected: Boolean(transientWorkContext),
+      work_sync_chars: transientWorkContext.length,
+      messages_before_work_sync: llmMessages.length,
+      messages_sent_upstream: messagesWithCurrentWork.length
+    }));
+
     if (!TARGET_API_URL || !process.env.TARGET_API_KEY) {
       return reply.code(500).send({ error: "TARGET_API_URL / TARGET_API_KEY 未配置" });
     }
@@ -705,8 +721,10 @@ app.post("/v1/chat/completions", async (req, reply) => {
         "Content-Type": "application/json",
         Authorization: `Bearer ${process.env.TARGET_API_KEY}`
       },
-      body: JSON.stringify({ ...body, messages: llmMessages })
+      body: JSON.stringify({ ...body, messages: messagesWithCurrentWork })
     });
+    // 只有上游已成功接收本次请求，才把这些事实视为已同步给模型。
+    if (response.ok) markWorkSyncDelivered(workSync.cursor, new Date(), "kelivo");
 
     const upstreamContentType = response.headers.get("content-type") || "";
     const shouldStreamResponse = requestedStream || upstreamContentType.includes("text/event-stream");
@@ -724,6 +742,7 @@ app.post("/v1/chat/completions", async (req, reply) => {
       return reply.code(response.status).send({ error: "上游 API 没有返回可读取的响应体" });
     }
 
+    reply.hijack();
     reply.raw.writeHead(response.status, {
       "Content-Type": upstreamContentType || "text/event-stream",
       "Cache-Control": "no-cache",
@@ -739,7 +758,13 @@ app.post("/v1/chat/completions", async (req, reply) => {
     reply.raw.end();
   } catch (err) {
     console.error(err);
-    reply.code(500).send({ error: err.message });
+    if (reply.sent || reply.raw.headersSent) {
+      if (!reply.raw.destroyed && !reply.raw.writableEnded) {
+        reply.raw.end();
+      }
+      return reply;
+    }
+    return reply.code(500).send({ error: err.message });
   }
 });
 
